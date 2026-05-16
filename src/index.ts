@@ -36,10 +36,17 @@ server.tool(
     branch: z.string().optional().describe("Branch name"),
     commitSha: z.string().optional().describe("Commit SHA"),
     runId: z.string().optional().describe("CI run identifier"),
+    customInfraPatterns: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Extra regex patterns (as strings) to classify as infrastructure errors, e.g. cloud-provider-specific messages like 'No space left on device' or 'GCP quota exceeded'",
+      ),
   },
   async (args) => {
+    const extraPatterns = (args.customInfraPatterns ?? []).map((p) => new RegExp(p, "i"));
     const input: CIRunInput = args;
-    const result = aggregateFailures(input);
+    const result = aggregateFailures(input, extraPatterns);
 
     const lines = [
       `CI Run Summary`,
@@ -155,56 +162,117 @@ server.tool(
       .array(z.string())
       .optional()
       .describe("Tests known to be affected by code changes (from ast-impact-mapper-mcp)"),
+    customInfraPatterns: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Extra regex patterns (as strings) to classify as infrastructure errors, e.g. 'GCP quota exceeded', 'No space left on device'",
+      ),
+    format: z
+      .enum(["text", "markdown"])
+      .optional()
+      .describe(
+        "Output format. Use 'markdown' for GitHub PR comments or Slack. Defaults to 'text'.",
+      ),
   },
   async (args) => {
+    const extraPatterns = (args.customInfraPatterns ?? []).map((p) => new RegExp(p, "i"));
     const flakiness: FlakinessInput = { entries: args.flakinessHistory };
     const codeChanges: CodeChangeInput = {
       changedFiles: args.changedFiles,
       affectedTests: args.affectedTests,
     };
 
-    const triaged = triageFailures(args.failures, flakiness, codeChanges);
+    const triaged = triageFailures(args.failures, flakiness, codeChanges, extraPatterns);
     const rec = generateRecommendation(triaged);
-
     const confidence = Math.round(rec.confidence * 100);
-    const lines = [
-      `Release Recommendation: ${rec.verdict} (${confidence}% confidence)`,
-      ``,
-      rec.summary,
-      ``,
-      `Stats:`,
-      `  Total failures:    ${rec.stats.totalFailures}`,
-      `  Real regressions:  ${rec.stats.realRegressions}`,
-      `  Known flaky:       ${rec.stats.knownFlaky}`,
-      `  Infra blips:       ${rec.stats.infraBlips}`,
-      `  Unknown:           ${rec.stats.unknown}`,
-    ];
 
-    if (rec.blockers.length > 0) {
-      lines.push(``, `BLOCKERS (must fix before release):`);
-      for (const b of rec.blockers) {
-        lines.push(`  ✗ ${b.suiteName} > ${b.testName}`);
-        lines.push(`    ${b.reason}`);
-        lines.push(`    Error: ${b.errorMessage.slice(0, 100)}`);
+    let text: string;
+
+    if (args.format === "markdown") {
+      const verdictEmoji = rec.verdict === "GO" ? "🟢" : rec.verdict === "NO_GO" ? "🔴" : "🟡";
+      const lines = [
+        `## ${verdictEmoji} Release Recommendation: ${rec.verdict} (${confidence}% confidence)`,
+        ``,
+        `> ${rec.summary}`,
+        ``,
+        `| Category | Count |`,
+        `|---|---|`,
+        `| Total failures | ${rec.stats.totalFailures} |`,
+        `| 🔴 Real regressions | ${rec.stats.realRegressions} |`,
+        `| 🟡 Known flaky | ${rec.stats.knownFlaky} |`,
+        `| ⚪ Infra blips | ${rec.stats.infraBlips} |`,
+        `| ❓ Unknown | ${rec.stats.unknown} |`,
+      ];
+
+      if (rec.blockers.length > 0) {
+        lines.push(``, `### 🔴 Blockers (must fix before release)`, ``);
+        for (const b of rec.blockers) {
+          lines.push(`**${b.suiteName} > ${b.testName}**`);
+          lines.push(`- ${b.reason}`);
+          lines.push(`- \`${b.errorMessage.slice(0, 120)}\``);
+          lines.push(``);
+        }
       }
+
+      if (rec.warnings.length > 0) {
+        lines.push(`### 🟡 Investigate (unclear cause)`, ``);
+        for (const w of rec.warnings) {
+          lines.push(`- **${w.suiteName} > ${w.testName}** — ${w.reason}`);
+        }
+        lines.push(``);
+      }
+
+      if (rec.safeToIgnore.length > 0) {
+        lines.push(`### ✅ Safe to ignore`, ``);
+        for (const s of rec.safeToIgnore) {
+          lines.push(`- ~~${s.suiteName} > ${s.testName}~~ — ${s.reason}`);
+        }
+      }
+
+      text = lines.join("\n");
+    } else {
+      const lines = [
+        `Release Recommendation: ${rec.verdict} (${confidence}% confidence)`,
+        ``,
+        rec.summary,
+        ``,
+        `Stats:`,
+        `  Total failures:    ${rec.stats.totalFailures}`,
+        `  Real regressions:  ${rec.stats.realRegressions}`,
+        `  Known flaky:       ${rec.stats.knownFlaky}`,
+        `  Infra blips:       ${rec.stats.infraBlips}`,
+        `  Unknown:           ${rec.stats.unknown}`,
+      ];
+
+      if (rec.blockers.length > 0) {
+        lines.push(``, `BLOCKERS (must fix before release):`);
+        for (const b of rec.blockers) {
+          lines.push(`  ✗ ${b.suiteName} > ${b.testName}`);
+          lines.push(`    ${b.reason}`);
+          lines.push(`    Error: ${b.errorMessage.slice(0, 100)}`);
+        }
+      }
+
+      if (rec.warnings.length > 0) {
+        lines.push(``, `INVESTIGATE (unclear cause):`);
+        for (const w of rec.warnings) {
+          lines.push(`  ? ${w.suiteName} > ${w.testName}`);
+          lines.push(`    ${w.reason}`);
+        }
+      }
+
+      if (rec.safeToIgnore.length > 0) {
+        lines.push(``, `SAFE TO IGNORE:`);
+        for (const s of rec.safeToIgnore) {
+          lines.push(`  ✓ ${s.suiteName} > ${s.testName} — ${s.reason}`);
+        }
+      }
+
+      text = lines.join("\n");
     }
 
-    if (rec.warnings.length > 0) {
-      lines.push(``, `INVESTIGATE (unclear cause):`);
-      for (const w of rec.warnings) {
-        lines.push(`  ? ${w.suiteName} > ${w.testName}`);
-        lines.push(`    ${w.reason}`);
-      }
-    }
-
-    if (rec.safeToIgnore.length > 0) {
-      lines.push(``, `SAFE TO IGNORE:`);
-      for (const s of rec.safeToIgnore) {
-        lines.push(`  ✓ ${s.suiteName} > ${s.testName} — ${s.reason}`);
-      }
-    }
-
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return { content: [{ type: "text", text }] };
   },
 );
 

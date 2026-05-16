@@ -8,7 +8,7 @@ import type {
   TestFailure,
 } from "./types.js";
 
-const INFRA_PATTERNS = [
+const DEFAULT_INFRA_PATTERNS = [
   /ECONNREFUSED/i,
   /ECONNRESET/i,
   /ETIMEDOUT/i,
@@ -33,15 +33,22 @@ function errorSignature(msg: string): string {
     .slice(0, 120);
 }
 
-function categorizeError(msg: string): "assertion" | "timeout" | "network" | "crash" | "unknown" {
-  if (INFRA_PATTERNS.some((r) => r.test(msg))) return "network";
+function categorizeError(
+  msg: string,
+  extraInfraPatterns: RegExp[] = [],
+): "assertion" | "timeout" | "network" | "crash" | "unknown" {
+  const infraPatterns = [...DEFAULT_INFRA_PATTERNS, ...extraInfraPatterns];
+  if (infraPatterns.some((r) => r.test(msg))) return "network";
   if (TIMEOUT_PATTERNS.some((r) => r.test(msg))) return "timeout";
   if (/expect|assert|toBe|toEqual|toHave/i.test(msg)) return "assertion";
   if (/segfault|core dump|SIGSEGV|abort/i.test(msg)) return "crash";
   return "unknown";
 }
 
-export function aggregateFailures(input: CIRunInput): {
+export function aggregateFailures(
+  input: CIRunInput,
+  customInfraPatterns: RegExp[] = [],
+): {
   groups: FailureGroup[];
   totalFailures: number;
   failureRate: number;
@@ -60,7 +67,7 @@ export function aggregateFailures(input: CIRunInput): {
       signature: sig,
       count: tests.length,
       tests,
-      category: categorizeError(tests[0].errorMessage),
+      category: categorizeError(tests[0].errorMessage, customInfraPatterns),
     }))
     .sort((a, b) => b.count - a.count);
 
@@ -78,6 +85,7 @@ export function triageFailures(
   failures: TestFailure[],
   flakiness: FlakinessInput,
   codeChanges: CodeChangeInput,
+  customInfraPatterns: RegExp[] = [],
 ): TriagedFailure[] {
   const flakyMap = new Map<string, number>();
   for (const e of flakiness.entries) {
@@ -90,7 +98,7 @@ export function triageFailures(
     const key = `${f.suiteName}::${f.testName}`;
     const flakyProb = flakyMap.get(key) ?? 0;
     const isAffected = affectedSet.has(f.testName) || affectedSet.has(key);
-    const category = categorizeError(f.errorMessage);
+    const category = categorizeError(f.errorMessage, customInfraPatterns);
 
     if (category === "network" || category === "timeout") {
       return {
