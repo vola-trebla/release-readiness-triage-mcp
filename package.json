@@ -1,6 +1,6 @@
 {
   "name": "release-readiness-triage-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server that aggregates CI failures, cross-references flakiness history, and generates go/no-go release recommendations",
   "type": "module",
   "main": "dist/index.js",
