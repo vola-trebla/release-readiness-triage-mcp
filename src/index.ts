@@ -1,0 +1,212 @@
+#!/usr/bin/env node
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod/v4";
+import { aggregateFailures, triageFailures, generateRecommendation } from "./analyzer.js";
+import type { CIRunInput, FlakinessInput, CodeChangeInput } from "./types.js";
+
+const server = new McpServer({
+  name: "release-readiness-triage-mcp",
+  version: "0.1.0",
+});
+
+const TestFailureSchema = z.object({
+  testName: z.string(),
+  suiteName: z.string(),
+  errorMessage: z.string(),
+  filePath: z.string().optional(),
+  duration: z.number().optional(),
+});
+
+const FlakinessEntrySchema = z.object({
+  testName: z.string(),
+  suiteName: z.string(),
+  flakyProbability: z.number().min(0).max(1),
+  recentFailures: z.number().int(),
+  totalRuns: z.number().int(),
+});
+
+server.tool(
+  "aggregate_suite_failures",
+  "Parse a CI test run and group failures by error signature. Deduplicates repeated errors and categorizes them as assertion, timeout, network, or crash. Use this as the first step before triage.",
+  {
+    failures: z.array(TestFailureSchema).describe("List of test failures from the CI run"),
+    totalTests: z.number().int().describe("Total number of tests in the run"),
+    passedTests: z.number().int().describe("Number of tests that passed"),
+    branch: z.string().optional().describe("Branch name"),
+    commitSha: z.string().optional().describe("Commit SHA"),
+    runId: z.string().optional().describe("CI run identifier"),
+  },
+  async (args) => {
+    const input: CIRunInput = args;
+    const result = aggregateFailures(input);
+
+    const lines = [
+      `CI Run Summary`,
+      `  Total tests:   ${args.totalTests}`,
+      `  Passed:        ${args.passedTests}`,
+      `  Failed:        ${result.totalFailures}`,
+      `  Failure rate:  ${result.failureRate}%`,
+      `  Error groups:  ${result.groups.length}`,
+      ``,
+      `Failure Groups (by frequency):`,
+    ];
+
+    for (const g of result.groups) {
+      lines.push(`  [${g.category.toUpperCase()}] ${g.count}x — ${g.signature}`);
+      for (const t of g.tests.slice(0, 3)) {
+        lines.push(`    • ${t.suiteName} > ${t.testName}`);
+      }
+      if (g.tests.length > 3) lines.push(`    … and ${g.tests.length - 3} more`);
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  },
+);
+
+server.tool(
+  "cross_reference_flakiness",
+  "Given a list of test failures and a flakiness history, score each failure by how likely it is to be a known flaky test vs a real regression. Returns probability scores per test.",
+  {
+    failures: z.array(TestFailureSchema).describe("Failures to evaluate"),
+    flakinessHistory: z
+      .array(FlakinessEntrySchema)
+      .describe(
+        "Historical flakiness data — testName, suiteName, flakyProbability (0–1), recentFailures, totalRuns",
+      ),
+  },
+  async (args) => {
+    const flakiness: FlakinessInput = { entries: args.flakinessHistory };
+
+    const lines = [`Flakiness Cross-Reference`, ``];
+
+    const flakyMap = new Map<string, number>();
+    for (const e of flakiness.entries) {
+      flakyMap.set(`${e.suiteName}::${e.testName}`, e.flakyProbability);
+    }
+
+    for (const f of args.failures) {
+      const key = `${f.suiteName}::${f.testName}`;
+      const prob = flakyMap.get(key);
+      if (prob !== undefined) {
+        const label = prob >= 0.5 ? "KNOWN FLAKY" : prob > 0.1 ? "MILDLY FLAKY" : "LIKELY STABLE";
+        lines.push(`  [${label}] ${f.suiteName} > ${f.testName}`);
+        lines.push(`    Flaky probability: ${Math.round(prob * 100)}%`);
+      } else {
+        lines.push(`  [NO HISTORY] ${f.suiteName} > ${f.testName}`);
+        lines.push(`    Not found in flakiness database`);
+      }
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  },
+);
+
+server.tool(
+  "correlate_code_changes",
+  "Match a list of changed files against failing tests to determine which failures are directly caused by the code changes in this commit. Returns a correlation mapping.",
+  {
+    changedFiles: z.array(z.string()).describe("List of file paths changed in this commit/PR"),
+    affectedTests: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Optional: test names already known to be affected (e.g. from ast-impact-mapper-mcp)",
+      ),
+    failures: z.array(TestFailureSchema).describe("Failures to correlate against"),
+  },
+  async (args) => {
+    const affectedSet = new Set(args.affectedTests ?? []);
+    const lines = [
+      `Code Change Correlation`,
+      `  Changed files: ${args.changedFiles.length}`,
+      `  Pre-identified affected tests: ${affectedSet.size}`,
+      ``,
+    ];
+
+    for (const f of args.failures) {
+      const key = `${f.suiteName}::${f.testName}`;
+      const isAffected = affectedSet.has(f.testName) || affectedSet.has(key);
+
+      const fileCorrelation = f.filePath
+        ? args.changedFiles.some((cf) => f.filePath!.includes(cf) || cf.includes(f.filePath!))
+        : false;
+
+      const verdict = isAffected || fileCorrelation ? "CORRELATED" : "NOT CORRELATED";
+      lines.push(`  [${verdict}] ${f.suiteName} > ${f.testName}`);
+      if (isAffected) lines.push(`    → Matched via affected test list`);
+      if (fileCorrelation) lines.push(`    → Matched via changed file: ${f.filePath}`);
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  },
+);
+
+server.tool(
+  "generate_release_recommendation",
+  "The final step: combines failures, flakiness history, and code change correlation to produce a GO / NO_GO / INVESTIGATE verdict with confidence score and a breakdown of blockers vs safe-to-ignore failures.",
+  {
+    failures: z.array(TestFailureSchema).describe("All failures from the CI run"),
+    flakinessHistory: z
+      .array(FlakinessEntrySchema)
+      .describe("Flakiness history for cross-referencing"),
+    changedFiles: z.array(z.string()).describe("Files changed in this commit/PR"),
+    affectedTests: z
+      .array(z.string())
+      .optional()
+      .describe("Tests known to be affected by code changes (from ast-impact-mapper-mcp)"),
+  },
+  async (args) => {
+    const flakiness: FlakinessInput = { entries: args.flakinessHistory };
+    const codeChanges: CodeChangeInput = {
+      changedFiles: args.changedFiles,
+      affectedTests: args.affectedTests,
+    };
+
+    const triaged = triageFailures(args.failures, flakiness, codeChanges);
+    const rec = generateRecommendation(triaged);
+
+    const confidence = Math.round(rec.confidence * 100);
+    const lines = [
+      `Release Recommendation: ${rec.verdict} (${confidence}% confidence)`,
+      ``,
+      rec.summary,
+      ``,
+      `Stats:`,
+      `  Total failures:    ${rec.stats.totalFailures}`,
+      `  Real regressions:  ${rec.stats.realRegressions}`,
+      `  Known flaky:       ${rec.stats.knownFlaky}`,
+      `  Infra blips:       ${rec.stats.infraBlips}`,
+      `  Unknown:           ${rec.stats.unknown}`,
+    ];
+
+    if (rec.blockers.length > 0) {
+      lines.push(``, `BLOCKERS (must fix before release):`);
+      for (const b of rec.blockers) {
+        lines.push(`  ✗ ${b.suiteName} > ${b.testName}`);
+        lines.push(`    ${b.reason}`);
+        lines.push(`    Error: ${b.errorMessage.slice(0, 100)}`);
+      }
+    }
+
+    if (rec.warnings.length > 0) {
+      lines.push(``, `INVESTIGATE (unclear cause):`);
+      for (const w of rec.warnings) {
+        lines.push(`  ? ${w.suiteName} > ${w.testName}`);
+        lines.push(`    ${w.reason}`);
+      }
+    }
+
+    if (rec.safeToIgnore.length > 0) {
+      lines.push(``, `SAFE TO IGNORE:`);
+      for (const s of rec.safeToIgnore) {
+        lines.push(`  ✓ ${s.suiteName} > ${s.testName} — ${s.reason}`);
+      }
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  },
+);
+
+const transport = new StdioServerTransport();
+await server.connect(transport);
