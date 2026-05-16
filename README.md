@@ -1,28 +1,38 @@
-# release-readiness-triage-mcp
+# 🚦 release-readiness-triage-mcp
 
-MCP server that aggregates CI test failures, cross-references flakiness history, and generates a **GO / NO_GO / INVESTIGATE** release recommendation — so your AI agent can triage a broken CI run in seconds instead of asking you to read logs manually.
+[![npm](https://img.shields.io/npm/v/release-readiness-triage-mcp)](https://www.npmjs.com/package/release-readiness-triage-mcp)
+[![CI](https://github.com/vola-trebla/release-readiness-triage-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/vola-trebla/release-readiness-triage-mcp/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## The problem
+**Stop reading CI logs. Start getting verdicts.**
 
-In any real codebase, CI always has _something_ failing. The hard question isn't "are there failures?" — it's "are these failures real regressions, or just the usual noise?"
+MCP server that aggregates test failures, cross-references flakiness history, and outputs a **GO / NO_GO / INVESTIGATE** release decision — so your AI agent can triage a broken CI run in seconds instead of asking you to read 3000 lines of logs.
 
-That requires correlating three things at once:
+---
 
-- **Error signatures** — is this the same failure repeated 12 times, or 12 different problems?
-- **Flakiness history** — is this test known to be unreliable?
-- **Code changes** — is the failing test actually related to what changed?
+## 🤔 The problem
 
-An AI agent can't do this without structured tools. Raw CI logs are thousands of lines. Flakiness databases are external. Code→test mapping requires AST analysis.
+In any real codebase, CI always has _something_ failing. The hard question isn't "are there failures?" — it's **"are these failures real regressions, or just the usual noise?"**
 
-## Tools
+Answering that requires correlating three signals at once:
+
+- 🔍 **Error signatures** — is this the same failure repeated 12 times, or 12 different problems?
+- 📊 **Flakiness history** — is this test known to be unreliable?
+- 🔗 **Code changes** — is the failing test actually related to what changed?
+
+An AI agent can't do this without structured tools. Raw CI logs are thousands of lines. Flakiness databases are external. Code→test mapping requires AST analysis. Without this MCP, the agent just guesses.
+
+---
+
+## 🛠️ Tools
 
 ### `aggregate_suite_failures`
 
-Groups test failures by normalized error signature, deduplicates repeated errors, and categorizes them as `assertion`, `timeout`, `network`, or `crash`. Use this first.
+Groups failures by normalized error signature, deduplicates repeated errors, categorizes as `assertion / timeout / network / crash`. Pass `customInfraPatterns` for cloud-specific errors.
 
 ### `cross_reference_flakiness`
 
-Takes failures + your flakiness history and scores each test: `KNOWN FLAKY`, `MILDLY FLAKY`, or `NO HISTORY`. Accepts any flakiness data format (probability 0–1 per test).
+Scores each failure against your flakiness history: `KNOWN FLAKY`, `MILDLY FLAKY`, or `NO HISTORY`.
 
 ### `correlate_code_changes`
 
@@ -30,30 +40,63 @@ Matches changed files against failing tests. Works standalone or with pre-comput
 
 ### `generate_release_recommendation`
 
-The final step. Combines all three signals and outputs:
+The final step. Outputs `GO / NO_GO / INVESTIGATE` with confidence score and full breakdown. Supports `format: "markdown"` for GitHub PR comments and Slack.
+
+---
+
+## 🧪 What it looks like in practice
+
+5 failures in CI. What's real, what's noise?
 
 ```
-Release Recommendation: GO (87% confidence)
+failures:
+  - Auth Suite > login with expired token   → "Expected status 200, got 401"
+  - API Suite > health check                → "connect ECONNREFUSED 127.0.0.1:3000"
+  - Button Suite > renders button correctly → "Expected null, got <button>Submit</button>"
+  - Search Suite > debounce timing          → "Expected 42, received 43"
+  - Storage Suite > upload avatar           → "GCP quota exceeded for this project"
 
-All 4 failure(s) are either known flaky or infrastructure noise. Safe to release.
-
-Stats:
-  Total failures:    4
-  Real regressions:  0
-  Known flaky:       3
-  Infra blips:       1
-  Unknown:           0
-
-SAFE TO IGNORE:
-  ✓ Auth Suite > login with expired token — Historically flaky: 73% failure rate in history
-  ✓ Auth Suite > refresh flow — Historically flaky: 61% failure rate in history
-  ✓ Search Suite > debounce timing — Mildly flaky: 22% historical failure rate
-  ✓ API Suite > health check — Error pattern matches infrastructure issues (network)
+changedFiles: ["src/components/Button.tsx"]
+affectedTests: ["renders button correctly"]
+customInfraPatterns: ["GCP quota exceeded"]
+format: "markdown"
 ```
 
-## Setup
+Output:
 
-Add to your Claude Desktop / Cursor config:
+```markdown
+## 🔴 Release Recommendation: NO_GO (75% confidence)
+
+> 1 confirmed regression(s) directly correlated with code changes. Do not release.
+
+| Category            | Count |
+| ------------------- | ----- |
+| Total failures      | 5     |
+| 🔴 Real regressions | 1     |
+| 🟡 Known flaky      | 2     |
+| ⚪ Infra blips      | 2     |
+| ❓ Unknown          | 0     |
+
+### 🔴 Blockers (must fix before release)
+
+**Button Suite > renders button correctly**
+
+- Test is directly affected by code changes in this commit
+- `Expected null, got <button>Submit</button>`
+
+### ✅ Safe to ignore
+
+- ~~Auth Suite > login with expired token~~ — Historically flaky: 73% failure rate in history
+- ~~API Suite > health check~~ — Error pattern matches infrastructure issues (network)
+- ~~Search Suite > debounce timing~~ — Mildly flaky: 22% historical failure rate
+- ~~Storage Suite > upload avatar~~ — Error pattern matches infrastructure issues (network)
+```
+
+One tool call. One verdict. Go fix `Button.tsx`.
+
+---
+
+## ⚡ Setup
 
 ```json
 {
@@ -66,15 +109,23 @@ Add to your Claude Desktop / Cursor config:
 }
 ```
 
-## Usage
+---
 
-Give the agent your CI failures (from any test runner), your flakiness history, and the list of changed files:
+## 🚀 Usage
 
-> "Here are 8 test failures from our CI run, our flakiness database, and the files changed in this PR. Generate a release recommendation."
+> "Here are the failures from our CI run, our flakiness database, and the files changed in this PR. Is it safe to release?"
 
-The agent calls `generate_release_recommendation` and returns a verdict with full breakdown.
+The agent calls `generate_release_recommendation` and returns a verdict with a full breakdown — ready to paste into a PR comment or Slack.
 
-## Links
+Works standalone, or as a meta-orchestrator on top of:
+
+- [flakiness-knowledge-graph-mcp](https://www.npmjs.com/package/flakiness-knowledge-graph-mcp) — for flakiness history
+- [ast-impact-mapper-mcp](https://www.npmjs.com/package/ast-impact-mapper-mcp) — for code→test correlation
+- [playwright-trace-decoder-mcp](https://www.npmjs.com/package/playwright-trace-decoder-mcp) — for trace-level failure analysis
+
+---
+
+## 📦 Links
 
 - **npm:** [npmjs.com/package/release-readiness-triage-mcp](https://www.npmjs.com/package/release-readiness-triage-mcp)
 - **GitHub:** [github.com/vola-trebla/release-readiness-triage-mcp](https://github.com/vola-trebla/release-readiness-triage-mcp)
