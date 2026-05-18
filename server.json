@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.vola-trebla/release-readiness-triage-mcp",
+  "description": "MCP server that aggregates CI failures, cross-references flakiness history, and generates go/no-go release recommendations",
+  "repository": {
+    "url": "https://github.com/vola-trebla/release-readiness-triage-mcp",
+    "source": "github"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "release-readiness-triage-mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -54,5 +54,10 @@
     "src/**/*.ts": [
       "eslint --fix"
     ]
+  },
+  "mcpName": "io.github.vola-trebla/release-readiness-triage-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vola-trebla/release-readiness-triage-mcp.git"
   }
 }
