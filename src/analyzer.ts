@@ -6,7 +6,7 @@ import type {
   TriagedFailure,
   ReleaseRecommendation,
   TestFailure,
-} from "./types.js";
+} from './types.js';
 
 const DEFAULT_INFRA_PATTERNS = [
   /ECONNREFUSED/i,
@@ -25,24 +25,24 @@ const TIMEOUT_PATTERNS = [/timeout/i, /timed out/i, /exceeded.*ms/i, /waitFor/i]
 
 function errorSignature(msg: string): string {
   return msg
-    .replace(/\d+ms/g, "Xms")
-    .replace(/\d+\.\d+s/g, "Xs")
-    .replace(/:[0-9]+\)/g, ":L)")
-    .replace(/0x[0-9a-f]+/gi, "0xADDR")
-    .replace(/\/.+?\.ts:\d+/g, "<file>")
+    .replace(/\d+ms/g, 'Xms')
+    .replace(/\d+\.\d+s/g, 'Xs')
+    .replace(/:[0-9]+\)/g, ':L)')
+    .replace(/0x[0-9a-f]+/gi, '0xADDR')
+    .replace(/\/.+?\.ts:\d+/g, '<file>')
     .slice(0, 120);
 }
 
 function categorizeError(
   msg: string,
   extraInfraPatterns: RegExp[] = [],
-): "assertion" | "timeout" | "network" | "crash" | "unknown" {
+): 'assertion' | 'timeout' | 'network' | 'crash' | 'unknown' {
   const infraPatterns = [...DEFAULT_INFRA_PATTERNS, ...extraInfraPatterns];
-  if (infraPatterns.some((r) => r.test(msg))) return "network";
-  if (TIMEOUT_PATTERNS.some((r) => r.test(msg))) return "timeout";
-  if (/expect|assert|toBe|toEqual|toHave/i.test(msg)) return "assertion";
-  if (/segfault|core dump|SIGSEGV|abort/i.test(msg)) return "crash";
-  return "unknown";
+  if (infraPatterns.some((r) => r.test(msg))) return 'network';
+  if (TIMEOUT_PATTERNS.some((r) => r.test(msg))) return 'timeout';
+  if (/expect|assert|toBe|toEqual|toHave/i.test(msg)) return 'assertion';
+  if (/segfault|core dump|SIGSEGV|abort/i.test(msg)) return 'crash';
+  return 'unknown';
 }
 
 export function aggregateFailures(
@@ -100,12 +100,12 @@ export function triageFailures(
     const isAffected = affectedSet.has(f.testName) || affectedSet.has(key);
     const category = categorizeError(f.errorMessage, customInfraPatterns);
 
-    if (category === "network" || category === "timeout") {
+    if (category === 'network' || category === 'timeout') {
       return {
         testName: f.testName,
         suiteName: f.suiteName,
         errorMessage: f.errorMessage,
-        verdict: "infra_blip",
+        verdict: 'infra_blip',
         confidence: 0.75,
         reason: `Error pattern matches infrastructure issues (${category})`,
         flakyProbability: flakyProb,
@@ -118,7 +118,7 @@ export function triageFailures(
         testName: f.testName,
         suiteName: f.suiteName,
         errorMessage: f.errorMessage,
-        verdict: "known_flaky",
+        verdict: 'known_flaky',
         confidence: flakyProb,
         reason: `Historically flaky: ${Math.round(flakyProb * 100)}% failure rate in history`,
         flakyProbability: flakyProb,
@@ -131,9 +131,9 @@ export function triageFailures(
         testName: f.testName,
         suiteName: f.suiteName,
         errorMessage: f.errorMessage,
-        verdict: "real_regression",
+        verdict: 'real_regression',
         confidence: 0.85,
-        reason: "Test is directly affected by code changes in this commit",
+        reason: 'Test is directly affected by code changes in this commit',
         flakyProbability: flakyProb,
         relatedToChangedCode: true,
       };
@@ -144,7 +144,7 @@ export function triageFailures(
         testName: f.testName,
         suiteName: f.suiteName,
         errorMessage: f.errorMessage,
-        verdict: "known_flaky",
+        verdict: 'known_flaky',
         confidence: flakyProb,
         reason: `Mildly flaky: ${Math.round(flakyProb * 100)}% historical failure rate`,
         flakyProbability: flakyProb,
@@ -156,9 +156,9 @@ export function triageFailures(
       testName: f.testName,
       suiteName: f.suiteName,
       errorMessage: f.errorMessage,
-      verdict: "unknown",
+      verdict: 'unknown',
       confidence: 0.4,
-      reason: "No flakiness history and no direct code correlation found",
+      reason: 'No flakiness history and no direct code correlation found',
       flakyProbability: flakyProb,
       relatedToChangedCode: false,
     };
@@ -166,38 +166,38 @@ export function triageFailures(
 }
 
 export function generateRecommendation(triaged: TriagedFailure[]): ReleaseRecommendation {
-  const blockers = triaged.filter((t) => t.verdict === "real_regression");
-  const warnings = triaged.filter((t) => t.verdict === "unknown");
+  const blockers = triaged.filter((t) => t.verdict === 'real_regression');
+  const warnings = triaged.filter((t) => t.verdict === 'unknown');
   const safeToIgnore = triaged.filter(
-    (t) => t.verdict === "known_flaky" || t.verdict === "infra_blip",
+    (t) => t.verdict === 'known_flaky' || t.verdict === 'infra_blip',
   );
 
   const stats = {
     totalFailures: triaged.length,
     realRegressions: blockers.length,
-    knownFlaky: triaged.filter((t) => t.verdict === "known_flaky").length,
-    infraBlips: triaged.filter((t) => t.verdict === "infra_blip").length,
+    knownFlaky: triaged.filter((t) => t.verdict === 'known_flaky').length,
+    infraBlips: triaged.filter((t) => t.verdict === 'infra_blip').length,
     unknown: warnings.length,
   };
 
-  let verdict: "GO" | "NO_GO" | "INVESTIGATE";
+  let verdict: 'GO' | 'NO_GO' | 'INVESTIGATE';
   let confidence: number;
   let summary: string;
 
   if (blockers.length > 0) {
-    verdict = "NO_GO";
+    verdict = 'NO_GO';
     confidence = Math.min(0.95, 0.7 + blockers.length * 0.05);
     summary = `${blockers.length} confirmed regression(s) directly correlated with code changes. Do not release.`;
   } else if (warnings.length > 2) {
-    verdict = "INVESTIGATE";
+    verdict = 'INVESTIGATE';
     confidence = 0.6;
     summary = `${warnings.length} failures with no clear cause. Investigate before releasing.`;
   } else if (triaged.length === 0) {
-    verdict = "GO";
+    verdict = 'GO';
     confidence = 1.0;
-    summary = "No failures. Safe to release.";
+    summary = 'No failures. Safe to release.';
   } else {
-    verdict = "GO";
+    verdict = 'GO';
     confidence = Math.max(0.7, 1.0 - warnings.length * 0.1);
     summary = `All ${triaged.length} failure(s) are either known flaky or infrastructure noise. Safe to release.`;
   }

@@ -19,7 +19,7 @@ export interface FailureGroup {
   signature: string;
   count: number;
   tests: TestFailure[];
-  category: "assertion" | "timeout" | "network" | "crash" | "unknown";
+  category: 'assertion' | 'timeout' | 'network' | 'crash' | 'unknown';
 }
 
 export interface FlakinessEntry {
@@ -43,7 +43,7 @@ export interface TriagedFailure {
   testName: string;
   suiteName: string;
   errorMessage: string;
-  verdict: "real_regression" | "known_flaky" | "infra_blip" | "unknown";
+  verdict: 'real_regression' | 'known_flaky' | 'infra_blip' | 'unknown';
   confidence: number;
   reason: string;
   flakyProbability?: number;
@@ -51,7 +51,7 @@ export interface TriagedFailure {
 }
 
 export interface ReleaseRecommendation {
-  verdict: "GO" | "NO_GO" | "INVESTIGATE";
+  verdict: 'GO' | 'NO_GO' | 'INVESTIGATE';
   confidence: number;
   summary: string;
   blockers: TriagedFailure[];
