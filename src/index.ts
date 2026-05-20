@@ -2,7 +2,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod/v4';
-import { aggregateFailures, triageFailures, generateRecommendation } from './analyzer.js';
+import {
+  aggregateFailures,
+  triageFailures,
+  generateRecommendation,
+  detectTemporalPatterns,
+} from './analyzer.js';
 import type { CIRunInput, FlakinessInput, CodeChangeInput } from './types.js';
 
 const server = new McpServer({
@@ -273,6 +278,26 @@ server.tool(
     }
 
     return { content: [{ type: 'text', text }] };
+  },
+);
+
+server.tool(
+  'detect_temporal_failure_patterns',
+  'Analyzes a history of test failures with timestamps to detect chronometric patterns: failures that cluster at the same UTC hour (hourly jobs), same day of month (billing runs), same weekday (scheduled jobs), or around DST transitions. When a pattern is found, the failure is a time artifact — not a code regression. The agent should schedule a re-run at a different time rather than investigating the source code.',
+  {
+    failures: z
+      .array(
+        z.object({
+          testName: z.string(),
+          suiteName: z.string(),
+          timestamp: z.string().describe('ISO 8601 timestamp of the failure'),
+        }),
+      )
+      .describe('Historical failure records with timestamps'),
+  },
+  async (args) => {
+    const result = detectTemporalPatterns(args.failures);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   },
 );
 
