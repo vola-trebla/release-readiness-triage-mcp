@@ -4,6 +4,7 @@ import {
   triageFailures,
   generateRecommendation,
   detectTemporalPatterns,
+  classifyDomain,
 } from '../src/analyzer.js';
 import type { CIRunInput, FlakinessInput, CodeChangeInput, TestFailure } from '../src/types.js';
 
@@ -165,12 +166,12 @@ describe('generateRecommendation', () => {
     expect(rec.safeToIgnore).toHaveLength(2);
   });
 
-  it('returns NO_GO when there are real regressions', () => {
+  it('returns NO_GO when there are real regressions in a HIGH severity domain', () => {
     const triaged = [
       {
-        testName: 't',
-        suiteName: 's',
-        errorMessage: 'e',
+        testName: 'charge fails',
+        suiteName: 'Payment Suite',
+        errorMessage: 'Expected 200 got 500',
         verdict: 'real_regression' as const,
         confidence: 0.85,
         reason: 'code changed',
@@ -181,6 +182,27 @@ describe('generateRecommendation', () => {
     expect(rec.verdict).toBe('NO_GO');
     expect(rec.blockers).toHaveLength(1);
     expect(rec.confidence).toBeGreaterThan(0.7);
+    expect(rec.aggregate_risk_score).toBeGreaterThan(0);
+    expect(rec.failing_tests_analysis[0].severity).toBe('HIGH');
+  });
+
+  it('returns CONDITIONAL_GO when regressions are in LOW/MEDIUM severity domain', () => {
+    const triaged = [
+      {
+        testName: 'chart renders',
+        suiteName: 'Analytics Dashboard',
+        errorMessage: 'Expected bar to be blue',
+        verdict: 'real_regression' as const,
+        confidence: 0.85,
+        reason: 'code changed',
+        relatedToChangedCode: true,
+      },
+    ];
+    const rec = generateRecommendation(triaged);
+    expect(rec.verdict).toBe('CONDITIONAL_GO');
+    expect(rec.failing_tests_analysis[0].severity).toBe('LOW');
+    expect(rec.aggregate_risk_score).toBeGreaterThan(0);
+    expect(rec.aggregate_risk_score).toBeLessThan(0.5);
   });
 
   it('returns INVESTIGATE when too many unknowns', () => {
@@ -234,6 +256,66 @@ describe('generateRecommendation', () => {
     expect(rec.stats.realRegressions).toBe(1);
     expect(rec.stats.knownFlaky).toBe(1);
     expect(rec.stats.infraBlips).toBe(1);
+  });
+
+  it('always returns aggregate_risk_score and failing_tests_analysis fields', () => {
+    const rec = generateRecommendation([]);
+    expect(rec.aggregate_risk_score).toBeDefined();
+    expect(rec.failing_tests_analysis).toBeDefined();
+    expect(Array.isArray(rec.failing_tests_analysis)).toBe(true);
+  });
+
+  it('blast_radius equals number of regressions in the same suite', () => {
+    const triaged = [
+      {
+        testName: 'test A',
+        suiteName: 'Auth Suite',
+        errorMessage: 'fail',
+        verdict: 'real_regression' as const,
+        confidence: 0.85,
+        reason: 'r',
+      },
+      {
+        testName: 'test B',
+        suiteName: 'Auth Suite',
+        errorMessage: 'fail',
+        verdict: 'real_regression' as const,
+        confidence: 0.85,
+        reason: 'r',
+      },
+    ];
+    const rec = generateRecommendation(triaged);
+    expect(rec.failing_tests_analysis[0].blast_radius).toBe(2);
+    expect(rec.failing_tests_analysis[1].blast_radius).toBe(2);
+  });
+});
+
+describe('classifyDomain', () => {
+  it('classifies payment suite as HIGH severity', () => {
+    const { domain, severity } = classifyDomain('Payment Suite');
+    expect(severity).toBe('HIGH');
+    expect(domain).toBe('payment');
+  });
+
+  it('classifies auth suite as HIGH severity', () => {
+    const { severity } = classifyDomain('Auth Integration Tests');
+    expect(severity).toBe('HIGH');
+  });
+
+  it('classifies analytics suite as LOW severity', () => {
+    const { severity } = classifyDomain('Analytics Dashboard Tests');
+    expect(severity).toBe('LOW');
+  });
+
+  it('classifies unknown suite as MEDIUM severity', () => {
+    const { domain, severity } = classifyDomain('Button Component Tests');
+    expect(severity).toBe('MEDIUM');
+    expect(domain).toBe('core');
+  });
+
+  it('uses filePath as fallback when suiteName has no match', () => {
+    const { severity } = classifyDomain('Generic Suite', 'src/billing/invoice.test.ts');
+    expect(severity).toBe('HIGH');
   });
 });
 

@@ -9,6 +9,8 @@ import type {
   FailureTimestamp,
   TemporalCluster,
   TemporalPatternsResult,
+  DomainSeverity,
+  FailingTestAnalysis,
 } from './types.js';
 
 const DEFAULT_INFRA_PATTERNS = [
@@ -108,6 +110,7 @@ export function triageFailures(
         testName: f.testName,
         suiteName: f.suiteName,
         errorMessage: f.errorMessage,
+        filePath: f.filePath,
         verdict: 'infra_blip',
         confidence: 0.75,
         reason: `Error pattern matches infrastructure issues (${category})`,
@@ -121,6 +124,7 @@ export function triageFailures(
         testName: f.testName,
         suiteName: f.suiteName,
         errorMessage: f.errorMessage,
+        filePath: f.filePath,
         verdict: 'known_flaky',
         confidence: flakyProb,
         reason: `Historically flaky: ${Math.round(flakyProb * 100)}% failure rate in history`,
@@ -134,6 +138,7 @@ export function triageFailures(
         testName: f.testName,
         suiteName: f.suiteName,
         errorMessage: f.errorMessage,
+        filePath: f.filePath,
         verdict: 'real_regression',
         confidence: 0.85,
         reason: 'Test is directly affected by code changes in this commit',
@@ -147,6 +152,7 @@ export function triageFailures(
         testName: f.testName,
         suiteName: f.suiteName,
         errorMessage: f.errorMessage,
+        filePath: f.filePath,
         verdict: 'known_flaky',
         confidence: flakyProb,
         reason: `Mildly flaky: ${Math.round(flakyProb * 100)}% historical failure rate`,
@@ -159,6 +165,7 @@ export function triageFailures(
       testName: f.testName,
       suiteName: f.suiteName,
       errorMessage: f.errorMessage,
+      filePath: f.filePath,
       verdict: 'unknown',
       confidence: 0.4,
       reason: 'No flakiness history and no direct code correlation found',
@@ -271,6 +278,38 @@ export function detectTemporalPatterns(failures: FailureTimestamp[]): TemporalPa
   return { temporal_pattern_detected: detected, clusters, summary };
 }
 
+const HIGH_SEVERITY_DOMAINS = [
+  'payment',
+  'auth',
+  'billing',
+  'checkout',
+  'security',
+  'transaction',
+  'stripe',
+  'paypal',
+];
+const LOW_SEVERITY_DOMAINS = ['docs', 'analytics', 'admin', 'reporting', 'dashboard', 'metrics'];
+
+export function classifyDomain(
+  suiteName: string,
+  filePath?: string,
+): { domain: string; severity: DomainSeverity } {
+  const haystack = `${suiteName} ${filePath ?? ''}`.toLowerCase();
+  for (const d of HIGH_SEVERITY_DOMAINS) {
+    if (haystack.includes(d)) return { domain: d, severity: 'HIGH' };
+  }
+  for (const d of LOW_SEVERITY_DOMAINS) {
+    if (haystack.includes(d)) return { domain: d, severity: 'LOW' };
+  }
+  return { domain: 'core', severity: 'MEDIUM' };
+}
+
+function severityWeight(severity: DomainSeverity): number {
+  if (severity === 'HIGH') return 1.0;
+  if (severity === 'MEDIUM') return 0.5;
+  return 0.2;
+}
+
 export function generateRecommendation(triaged: TriagedFailure[]): ReleaseRecommendation {
   const blockers = triaged.filter((t) => t.verdict === 'real_regression');
   const warnings = triaged.filter((t) => t.verdict === 'unknown');
@@ -286,14 +325,59 @@ export function generateRecommendation(triaged: TriagedFailure[]): ReleaseRecomm
     unknown: warnings.length,
   };
 
-  let verdict: 'GO' | 'NO_GO' | 'INVESTIGATE';
+  // Build per-test analysis for regressions
+  const suiteFailureCounts = new Map<string, number>();
+  for (const t of blockers) {
+    suiteFailureCounts.set(t.suiteName, (suiteFailureCounts.get(t.suiteName) ?? 0) + 1);
+  }
+
+  const failingTestsAnalysis: FailingTestAnalysis[] = blockers.map((t) => {
+    const { domain, severity } = classifyDomain(t.suiteName, t.filePath);
+    const weight = severityWeight(severity);
+    const flakyProb = t.flakyProbability ?? 0;
+    const riskContribution = Math.round(weight * (1 - flakyProb) * 100) / 100;
+    const blastRadius = suiteFailureCounts.get(t.suiteName) ?? 1;
+    return {
+      test_id: `${t.suiteName}::${t.testName}`,
+      domain,
+      severity,
+      risk_contribution: riskContribution,
+      blast_radius: blastRadius,
+    };
+  });
+
+  // aggregate_risk_score = probability union across regression risk contributions
+  let aggregateRiskScore = 0;
+  if (failingTestsAnalysis.length > 0) {
+    const unionComplement = failingTestsAnalysis.reduce(
+      (acc, a) => acc * (1 - a.risk_contribution),
+      1,
+    );
+    aggregateRiskScore = Math.round(Math.min(0.99, 1 - unionComplement) * 100) / 100;
+  } else if (warnings.length > 0) {
+    aggregateRiskScore = Math.round(Math.min(0.5, warnings.length * 0.1) * 100) / 100;
+  }
+
+  const hasHighSeverityBlocker = failingTestsAnalysis.some((a) => a.severity === 'HIGH');
+
+  let verdict: 'GO' | 'CONDITIONAL_GO' | 'NO_GO' | 'INVESTIGATE';
   let confidence: number;
   let summary: string;
 
-  if (blockers.length > 0) {
+  if (blockers.length > 0 && hasHighSeverityBlocker) {
     verdict = 'NO_GO';
     confidence = Math.min(0.95, 0.7 + blockers.length * 0.05);
-    summary = `${blockers.length} confirmed regression(s) directly correlated with code changes. Do not release.`;
+    const highDomains = [
+      ...new Set(failingTestsAnalysis.filter((a) => a.severity === 'HIGH').map((a) => a.domain)),
+    ].join(', ');
+    summary = `${blockers.length} confirmed regression(s) in critical domain(s) [${highDomains}]. Do not release.`;
+  } else if (blockers.length > 0) {
+    verdict = 'CONDITIONAL_GO';
+    confidence = Math.min(0.85, 0.6 + blockers.length * 0.05);
+    const domains = [...new Set(failingTestsAnalysis.map((a) => a.domain))].join(', ');
+    summary =
+      `${blockers.length} regression(s) in low/medium-risk domain(s) [${domains}] ` +
+      `(aggregate risk: ${aggregateRiskScore}). Review before releasing.`;
   } else if (warnings.length > 2) {
     verdict = 'INVESTIGATE';
     confidence = 0.6;
@@ -308,5 +392,15 @@ export function generateRecommendation(triaged: TriagedFailure[]): ReleaseRecomm
     summary = `All ${triaged.length} failure(s) are either known flaky or infrastructure noise. Safe to release.`;
   }
 
-  return { verdict, confidence, summary, blockers, warnings, safeToIgnore, stats };
+  return {
+    verdict,
+    confidence,
+    aggregate_risk_score: aggregateRiskScore,
+    summary,
+    blockers,
+    warnings,
+    safeToIgnore,
+    failing_tests_analysis: failingTestsAnalysis,
+    stats,
+  };
 }

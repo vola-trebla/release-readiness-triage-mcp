@@ -43,6 +43,7 @@ export interface TriagedFailure {
   testName: string;
   suiteName: string;
   errorMessage: string;
+  filePath?: string;
   verdict: 'real_regression' | 'known_flaky' | 'infra_blip' | 'unknown';
   confidence: number;
   reason: string;
@@ -50,13 +51,25 @@ export interface TriagedFailure {
   relatedToChangedCode?: boolean;
 }
 
+export type DomainSeverity = 'HIGH' | 'MEDIUM' | 'LOW';
+
+export interface FailingTestAnalysis {
+  test_id: string;
+  domain: string;
+  severity: DomainSeverity;
+  risk_contribution: number;
+  blast_radius: number;
+}
+
 export interface ReleaseRecommendation {
-  verdict: 'GO' | 'NO_GO' | 'INVESTIGATE';
+  verdict: 'GO' | 'CONDITIONAL_GO' | 'NO_GO' | 'INVESTIGATE';
   confidence: number;
+  aggregate_risk_score: number;
   summary: string;
   blockers: TriagedFailure[];
   warnings: TriagedFailure[];
   safeToIgnore: TriagedFailure[];
+  failing_tests_analysis: FailingTestAnalysis[];
   stats: {
     totalFailures: number;
     realRegressions: number;
