@@ -6,6 +6,9 @@ import type {
   TriagedFailure,
   ReleaseRecommendation,
   TestFailure,
+  FailureTimestamp,
+  TemporalCluster,
+  TemporalPatternsResult,
 } from './types.js';
 
 const DEFAULT_INFRA_PATTERNS = [
@@ -163,6 +166,109 @@ export function triageFailures(
       relatedToChangedCode: false,
     };
   });
+}
+
+// DST transitions: second Sunday of March (US spring forward) and first Sunday of November (US fall back).
+// We flag a ±2h window around 02:00 local on those Sundays as potential timezone shift artifacts.
+function isDstTransitionSunday(date: Date): boolean {
+  const month = date.getUTCMonth(); // 0-based
+  const dayOfWeek = date.getUTCDay(); // 0 = Sunday
+  if (dayOfWeek !== 0) return false;
+  if (month === 2) {
+    // March: 2nd Sunday = day 8–14
+    const dayOfMonth = date.getUTCDate();
+    return dayOfMonth >= 8 && dayOfMonth <= 14;
+  }
+  if (month === 10) {
+    // November: 1st Sunday = day 1–7
+    const dayOfMonth = date.getUTCDate();
+    return dayOfMonth >= 1 && dayOfMonth <= 7;
+  }
+  return false;
+}
+
+export function detectTemporalPatterns(failures: FailureTimestamp[]): TemporalPatternsResult {
+  // Group by test_id
+  const byTest = new Map<string, Date[]>();
+  for (const f of failures) {
+    const key = `${f.suiteName}::${f.testName}`;
+    const dates = byTest.get(key) ?? [];
+    dates.push(new Date(f.timestamp));
+    byTest.set(key, dates);
+  }
+
+  const clusters: TemporalCluster[] = [];
+
+  for (const [testId, dates] of byTest) {
+    if (dates.length < 2) continue;
+
+    // Check timezone_shift: all failures near 02:00 UTC on DST Sundays
+    const dstDates = dates.filter((d) => {
+      const hour = d.getUTCHours();
+      return isDstTransitionSunday(d) && hour >= 0 && hour <= 4;
+    });
+    if (dstDates.length === dates.length && dstDates.length >= 2) {
+      clusters.push({
+        test_id: testId,
+        pattern_type: 'timezone_shift',
+        cluster_times: dstDates.map((d) => d.toISOString()),
+        confidence_score: Math.min(0.95, 0.7 + dstDates.length * 0.05),
+      });
+      continue;
+    }
+
+    // Check hourly: all failures within ±30min of the same UTC hour
+    const hours = dates.map((d) => d.getUTCHours() + d.getUTCMinutes() / 60);
+    const referenceHour = hours[0];
+    const allNearSameHour = hours.every((h) => {
+      const diff = Math.abs(h - referenceHour);
+      return Math.min(diff, 24 - diff) <= 0.5;
+    });
+    if (allNearSameHour) {
+      clusters.push({
+        test_id: testId,
+        pattern_type: 'hourly',
+        cluster_times: dates.map((d) => d.toISOString()),
+        confidence_score: Math.min(0.95, 0.6 + dates.length * 0.07),
+      });
+      continue;
+    }
+
+    // Check monthly: all failures on the same day of month (±1)
+    const daysOfMonth = dates.map((d) => d.getUTCDate());
+    const refDay = daysOfMonth[0];
+    const allSameDay = daysOfMonth.every((day) => Math.abs(day - refDay) <= 1);
+    if (allSameDay) {
+      clusters.push({
+        test_id: testId,
+        pattern_type: 'monthly',
+        cluster_times: dates.map((d) => d.toISOString()),
+        confidence_score: Math.min(0.9, 0.55 + dates.length * 0.07),
+      });
+      continue;
+    }
+
+    // Check daily: all failures on the same UTC weekday
+    const weekdays = dates.map((d) => d.getUTCDay());
+    const refWeekday = weekdays[0];
+    const allSameWeekday = weekdays.every((wd) => wd === refWeekday);
+    if (allSameWeekday) {
+      clusters.push({
+        test_id: testId,
+        pattern_type: 'daily',
+        cluster_times: dates.map((d) => d.toISOString()),
+        confidence_score: Math.min(0.9, 0.5 + dates.length * 0.08),
+      });
+    }
+  }
+
+  const detected = clusters.length > 0;
+  const patternTypes = [...new Set(clusters.map((c) => c.pattern_type))];
+  const summary = detected
+    ? `${clusters.length} temporal cluster(s) detected (${patternTypes.join(', ')}). These failures are likely chronometric artifacts, not code regressions.`
+    : 'No temporal patterns detected. Failures appear to be randomly distributed in time.';
+
+  return { temporal_pattern_detected: detected, clusters, summary };
 }
 
 export function generateRecommendation(triaged: TriagedFailure[]): ReleaseRecommendation {

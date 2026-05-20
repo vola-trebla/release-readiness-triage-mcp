@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { aggregateFailures, triageFailures, generateRecommendation } from '../src/analyzer.js';
+import {
+  aggregateFailures,
+  triageFailures,
+  generateRecommendation,
+  detectTemporalPatterns,
+} from '../src/analyzer.js';
 import type { CIRunInput, FlakinessInput, CodeChangeInput, TestFailure } from '../src/types.js';
 
 const makeFailure = (
@@ -229,5 +234,83 @@ describe('generateRecommendation', () => {
     expect(rec.stats.realRegressions).toBe(1);
     expect(rec.stats.knownFlaky).toBe(1);
     expect(rec.stats.infraBlips).toBe(1);
+  });
+});
+
+describe('detectTemporalPatterns', () => {
+  it('returns no pattern when fewer than 2 failures per test', () => {
+    const result = detectTemporalPatterns([
+      { testName: 'only once', suiteName: 'S', timestamp: '2026-03-01T02:00:00Z' },
+    ]);
+    expect(result.temporal_pattern_detected).toBe(false);
+    expect(result.clusters).toHaveLength(0);
+  });
+
+  it('detects hourly pattern when failures cluster at the same UTC hour', () => {
+    const result = detectTemporalPatterns([
+      { testName: 'cron job', suiteName: 'S', timestamp: '2026-03-01T03:05:00Z' },
+      { testName: 'cron job', suiteName: 'S', timestamp: '2026-04-01T03:15:00Z' },
+      { testName: 'cron job', suiteName: 'S', timestamp: '2026-05-01T03:20:00Z' },
+    ]);
+    expect(result.temporal_pattern_detected).toBe(true);
+    expect(result.clusters[0].pattern_type).toBe('hourly');
+    expect(result.clusters[0].confidence_score).toBeGreaterThan(0.6);
+  });
+
+  it('detects monthly pattern when failures cluster on the same day of month', () => {
+    const result = detectTemporalPatterns([
+      { testName: 'billing', suiteName: 'S', timestamp: '2026-01-01T10:00:00Z' },
+      { testName: 'billing', suiteName: 'S', timestamp: '2026-02-01T14:00:00Z' },
+      { testName: 'billing', suiteName: 'S', timestamp: '2026-03-02T09:00:00Z' },
+    ]);
+    expect(result.temporal_pattern_detected).toBe(true);
+    expect(result.clusters[0].pattern_type).toBe('monthly');
+  });
+
+  it('detects daily (weekday) pattern when failures always occur on the same weekday', () => {
+    // 2026-01-05, 2026-01-12, 2026-01-19 are all Mondays (UTC day 1)
+    const result = detectTemporalPatterns([
+      { testName: 'weekly', suiteName: 'S', timestamp: '2026-01-05T18:30:00Z' },
+      { testName: 'weekly', suiteName: 'S', timestamp: '2026-01-12T09:00:00Z' },
+      { testName: 'weekly', suiteName: 'S', timestamp: '2026-01-19T14:00:00Z' },
+    ]);
+    expect(result.temporal_pattern_detected).toBe(true);
+    expect(result.clusters[0].pattern_type).toBe('daily');
+  });
+
+  it('detects timezone_shift when failures happen near 02:00 UTC on DST transition Sundays', () => {
+    // 2026-03-08 is the 2nd Sunday of March (US spring forward)
+    // 2027-03-14 is the 2nd Sunday of March next year
+    const result = detectTemporalPatterns([
+      { testName: 'dst test', suiteName: 'S', timestamp: '2026-03-08T02:30:00Z' },
+      { testName: 'dst test', suiteName: 'S', timestamp: '2027-03-14T01:45:00Z' },
+    ]);
+    expect(result.temporal_pattern_detected).toBe(true);
+    expect(result.clusters[0].pattern_type).toBe('timezone_shift');
+  });
+
+  it('returns no pattern when failures are randomly distributed', () => {
+    const result = detectTemporalPatterns([
+      { testName: 'random', suiteName: 'S', timestamp: '2026-01-01T02:00:00Z' },
+      { testName: 'random', suiteName: 'S', timestamp: '2026-01-15T14:30:00Z' },
+      { testName: 'random', suiteName: 'S', timestamp: '2026-02-20T09:15:00Z' },
+    ]);
+    expect(result.temporal_pattern_detected).toBe(false);
+  });
+
+  it('includes summary explaining the patterns found', () => {
+    const result = detectTemporalPatterns([
+      { testName: 'nightly', suiteName: 'S', timestamp: '2026-03-01T00:05:00Z' },
+      { testName: 'nightly', suiteName: 'S', timestamp: '2026-04-01T00:10:00Z' },
+    ]);
+    expect(result.summary).toContain('temporal cluster');
+  });
+
+  it('summary states no pattern when none detected', () => {
+    const result = detectTemporalPatterns([
+      { testName: 'rand', suiteName: 'S', timestamp: '2026-01-03T08:00:00Z' },
+      { testName: 'rand', suiteName: 'S', timestamp: '2026-02-17T20:00:00Z' },
+    ]);
+    expect(result.summary).toContain('No temporal patterns');
   });
 });

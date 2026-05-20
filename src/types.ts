@@ -65,3 +65,24 @@ export interface ReleaseRecommendation {
     unknown: number;
   };
 }
+
+export interface FailureTimestamp {
+  testName: string;
+  suiteName: string;
+  timestamp: string; // ISO 8601
+}
+
+export type TemporalPatternType = 'hourly' | 'daily' | 'monthly' | 'timezone_shift';
+
+export interface TemporalCluster {
+  test_id: string;
+  pattern_type: TemporalPatternType;
+  cluster_times: string[];
+  confidence_score: number;
+}
+
+export interface TemporalPatternsResult {
+  temporal_pattern_detected: boolean;
+  clusters: TemporalCluster[];
+  summary: string;
+}
