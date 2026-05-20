@@ -8,6 +8,7 @@ import {
   generateRecommendation,
   detectTemporalPatterns,
 } from './analyzer.js';
+import { analyzeRollbackReadiness } from './migrations.js';
 import type { CIRunInput, FlakinessInput, CodeChangeInput } from './types.js';
 
 const server = new McpServer({
@@ -298,6 +299,32 @@ server.tool(
   async (args) => {
     const result = detectTemporalPatterns(args.failures);
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  },
+);
+
+server.tool(
+  'analyze_rollback_readiness',
+  'Scans a repository for versioned database migration files (Flyway V*.sql, Prisma migration.sql, Liquibase XML/YAML) and classifies each operation as additive (rollback safe) or destructive (forward-fix only). Returns rollback_eligible, a list of blocking_migrations with file and line, and deployment_strategy. Use before recommending deployment to determine whether a rollback is safe after go-live.',
+  {
+    repo_path: z
+      .string()
+      .describe('Absolute path to the repository root to scan for migration files'),
+  },
+  async (args) => {
+    try {
+      const result = analyzeRollbackReadiness(args.repo_path);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
   },
 );
 
