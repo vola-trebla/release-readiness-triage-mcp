@@ -196,11 +196,20 @@ server.tool(
     let text: string;
 
     if (args.format === 'markdown') {
-      const verdictEmoji = rec.verdict === 'GO' ? '🟢' : rec.verdict === 'NO_GO' ? '🔴' : '🟡';
+      const verdictEmoji =
+        rec.verdict === 'GO'
+          ? '🟢'
+          : rec.verdict === 'NO_GO'
+            ? '🔴'
+            : rec.verdict === 'CONDITIONAL_GO'
+              ? '🟠'
+              : '🟡';
       const lines = [
         `## ${verdictEmoji} Release Recommendation: ${rec.verdict} (${confidence}% confidence)`,
         ``,
         `> ${rec.summary}`,
+        ``,
+        `**Aggregate risk score:** ${rec.aggregate_risk_score}`,
         ``,
         `| Category | Count |`,
         `|---|---|`,
@@ -211,8 +220,19 @@ server.tool(
         `| ❓ Unknown | ${rec.stats.unknown} |`,
       ];
 
+      if (rec.failing_tests_analysis.length > 0) {
+        lines.push(``, `### Risk Breakdown`, ``);
+        lines.push(`| Test | Domain | Severity | Risk | Blast Radius |`);
+        lines.push(`|---|---|---|---|---|`);
+        for (const a of rec.failing_tests_analysis) {
+          lines.push(
+            `| ${a.test_id} | ${a.domain} | ${a.severity} | ${a.risk_contribution} | ${a.blast_radius} |`,
+          );
+        }
+      }
+
       if (rec.blockers.length > 0) {
-        lines.push(``, `### 🔴 Blockers (must fix before release)`, ``);
+        lines.push(``, `### Blockers (must fix before release)`, ``);
         for (const b of rec.blockers) {
           lines.push(`**${b.suiteName} > ${b.testName}**`);
           lines.push(`- ${b.reason}`);
@@ -222,7 +242,7 @@ server.tool(
       }
 
       if (rec.warnings.length > 0) {
-        lines.push(`### 🟡 Investigate (unclear cause)`, ``);
+        lines.push(`### Investigate (unclear cause)`, ``);
         for (const w of rec.warnings) {
           lines.push(`- **${w.suiteName} > ${w.testName}** — ${w.reason}`);
         }
@@ -230,7 +250,7 @@ server.tool(
       }
 
       if (rec.safeToIgnore.length > 0) {
-        lines.push(`### ✅ Safe to ignore`, ``);
+        lines.push(`### Safe to ignore`, ``);
         for (const s of rec.safeToIgnore) {
           lines.push(`- ~~${s.suiteName} > ${s.testName}~~ — ${s.reason}`);
         }
@@ -240,6 +260,7 @@ server.tool(
     } else {
       const lines = [
         `Release Recommendation: ${rec.verdict} (${confidence}% confidence)`,
+        `Aggregate risk score:   ${rec.aggregate_risk_score}`,
         ``,
         rec.summary,
         ``,
@@ -250,6 +271,15 @@ server.tool(
         `  Infra blips:       ${rec.stats.infraBlips}`,
         `  Unknown:           ${rec.stats.unknown}`,
       ];
+
+      if (rec.failing_tests_analysis.length > 0) {
+        lines.push(``, `Risk Breakdown:`);
+        for (const a of rec.failing_tests_analysis) {
+          lines.push(
+            `  ${a.test_id} — domain: ${a.domain}, severity: ${a.severity}, risk: ${a.risk_contribution}, blast_radius: ${a.blast_radius}`,
+          );
+        }
+      }
 
       if (rec.blockers.length > 0) {
         lines.push(``, `BLOCKERS (must fix before release):`);
