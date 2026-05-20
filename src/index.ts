@@ -13,7 +13,7 @@ import type { CIRunInput, FlakinessInput, CodeChangeInput } from './types.js';
 
 const server = new McpServer({
   name: 'release-readiness-triage-mcp',
-  version: '0.1.0',
+  version: '0.2.0',
 });
 
 const TestFailureSchema = z.object({

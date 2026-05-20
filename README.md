@@ -6,7 +6,7 @@
 
 **Stop reading CI logs. Start getting verdicts.**
 
-MCP server that aggregates test failures, cross-references flakiness history, and outputs a **GO / NO_GO / INVESTIGATE** release decision — so your AI agent can triage a broken CI run in seconds instead of asking you to read 3000 lines of logs.
+MCP server that aggregates test failures, cross-references flakiness history, and outputs a **GO / CONDITIONAL_GO / NO_GO / INVESTIGATE** release decision — so your AI agent can triage a broken CI run in seconds instead of asking you to read 3000 lines of logs.
 
 ---
 
@@ -40,7 +40,40 @@ Matches changed files against failing tests. Works standalone or with pre-comput
 
 ### `generate_release_recommendation`
 
-The final step. Outputs `GO / NO_GO / INVESTIGATE` with confidence score and full breakdown. Supports `format: "markdown"` for GitHub PR comments and Slack.
+The final step. Outputs a risk-weighted verdict with confidence score and full breakdown. Supports `format: "markdown"` for GitHub PR comments and Slack.
+
+**Verdict levels:**
+
+- `NO_GO` — regression in a critical domain (`payment`, `auth`, `billing`, `checkout`, `security`)
+- `CONDITIONAL_GO` — regression in a low/medium-risk domain (`analytics`, `docs`, `admin`); review before releasing
+- `GO` — all failures are known flaky or infrastructure noise
+- `INVESTIGATE` — too many unknowns to decide
+
+**Output includes:**
+
+- `aggregate_risk_score` — 0.0–1.0, probability union across all regression risk contributions
+- `failing_tests_analysis[]` — per-regression breakdown with `domain`, `severity` (HIGH/MEDIUM/LOW), `risk_contribution`, `blast_radius`
+
+### `detect_temporal_failure_patterns`
+
+Analyzes historical failures with timestamps to identify chronometric artifacts — failures that only appear at the same UTC hour, weekday, day of month, or during DST transitions. When a pattern is found, the failure is a time artifact, not a code regression.
+
+**Output includes:**
+
+- `temporal_pattern_detected` — boolean
+- `clusters[]` — per-test: `pattern_type` (`hourly | daily | monthly | timezone_shift`), `cluster_times`, `confidence_score`
+
+### `analyze_rollback_readiness`
+
+Scans a repository for versioned migration files (Flyway `V*.sql`, Prisma `migration.sql`, Liquibase XML/YAML) and classifies each operation as additive (rollback safe) or destructive (forward-fix only).
+
+**Detected destructive operations:** `DROP TABLE`, `DROP COLUMN`, `ALTER COLUMN TYPE`, `MODIFY COLUMN`, `TRUNCATE`
+
+**Output includes:**
+
+- `rollback_eligible` — boolean
+- `blocking_migrations[]` — each with `file`, `line`, `operation`, `reason`
+- `deployment_strategy` — `standard | forward_fix_only`
 
 ---
 
@@ -67,7 +100,9 @@ Output:
 ```markdown
 ## 🔴 Release Recommendation: NO_GO (75% confidence)
 
-> 1 confirmed regression(s) directly correlated with code changes. Do not release.
+> 1 confirmed regression(s) in critical domain(s) [payment]. Do not release.
+
+**Aggregate risk score:** 1.0
 
 | Category            | Count |
 | ------------------- | ----- |
@@ -77,14 +112,20 @@ Output:
 | ⚪ Infra blips      | 2     |
 | ❓ Unknown          | 0     |
 
-### 🔴 Blockers (must fix before release)
+### Risk Breakdown
+
+| Test                                   | Domain | Severity | Risk | Blast Radius |
+| -------------------------------------- | ------ | -------- | ---- | ------------ |
+| Button Suite::renders button correctly | core   | MEDIUM   | 0.5  | 1            |
+
+### Blockers (must fix before release)
 
 **Button Suite > renders button correctly**
 
 - Test is directly affected by code changes in this commit
 - `Expected null, got <button>Submit</button>`
 
-### ✅ Safe to ignore
+### Safe to ignore
 
 - ~~Auth Suite > login with expired token~~ — Historically flaky: 73% failure rate in history
 - ~~API Suite > health check~~ — Error pattern matches infrastructure issues (network)

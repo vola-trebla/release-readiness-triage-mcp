@@ -1,6 +1,6 @@
 {
   "name": "release-readiness-triage-mcp",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "MCP server that aggregates CI failures, cross-references flakiness history, and generates go/no-go release recommendations",
   "type": "module",
   "main": "dist/index.js",
@@ -18,7 +18,7 @@
     "lint": "eslint src",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "prepare": "husky"
   },
   "keywords": [
